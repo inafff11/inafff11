@@ -1,0 +1,288 @@
+# The data preparation process. 
+## We start by loading the libraries needed and by loading the data. 
+library(JM)  ## this package contains the data set pbc2 
+library(pseudo) 
+library(dynpred) 
+
+data(pbc2) 
+
+data<-data.frame(id=pbc2$id,time=pbc2$years,age=pbc2$age,year=pbc2$year,serBilir=pbc2$serBilir,albumin=pbc2$albumin,SGOT=pbc2$SGOT/10,prothrombin=pbc2$prothrombin) 
+data$status<-as.numeric(pbc2$status=="dead") 
+data$drug<-as.numeric(pbc2$drug=="D-penicil") 
+data$sex<-as.numeric(pbc2$sex=="female") 
+data$edema<-as.numeric(pbc2$edema!="No edema") 
+# For easy statistical interpretation, histologic variable were 
+# transformed into dummy variables. 
+data$histologic3<-ifelse(pbc2$histologic==3,1,0) 
+data$histologic4<-ifelse(pbc2$histologic==4,1,0) 
+
+head(data)  # have a look at the values of the first data rows 
+
+
+#Establishment of the dynamic RMST model.
+## The landmark time points sl were selected every 0.2 years from  
+## the start of follow-up. 
+sL<-5 
+sl<-seq(0,sL,by=0.2) 
+nsl<-length(sl) 
+# the prediction window w=5 years 
+w<-5
+
+# Create the corresponding landmark datasets. 
+LMdata<-NULL 
+for (i in seq(along=sl)){ 
+  LM<-cutLM(data,outcome=list(time="time",status="status"),LM=sl[i],horizon=sl[i]+w,covs=list(fixed=c("drug","sex","age"),varying=c("serBilir","edema","albumin","prothrombin","histologic3","histologic4","SGOT")),format="long",id="id",rtime="year",right=F) 
+  LM$pseudo=pseudomean(time=LM$time-sl[i],event=LM$status,tmax=w) 
+  LMdata<-rbind(LMdata,LM)}
+
+# We define and run a function that generates the interactions  
+# between covariates and prediction time. 
+# We name this function define. 
+define<-function(data,cov,time){ 
+  for (i in 1:length(cov)){ 
+    s<-paste("data$",cov[i],".t",0:2,"<-data$",cov[i],  
+             c("","*time","*time^2"),sep="") 
+    eval(parse(text=s)) 
+  } 
+  
+  data$LM1<-time 
+  data$LM2<-time^2 
+  return(data) 
+} 
+
+LMdata<-define(data=LMdata,cov=c("drug","sex","serBilir","edema","albumin","prothrombin","histologic3","histologic4","age","SGOT"),time=LMdata$LM/sL) 
+
+# A backward step-down selection process 
+fit<-geese(pseudo~drug.t0 + drug.t1 #+ drug.t2 
+           + sex.t0 + sex.t1 + sex.t2 
+           + serBilir.t0 + serBilir.t1 + serBilir.t2 
+           + edema.t0 #+ edema.t1 + edema.t2 
+           + albumin.t0 #+ albumin.t1 + albumin.t2 
+           + prothrombin.t0 + prothrombin.t1 + prothrombin.t2 
+           + histologic3.t0 #+ histologic3.t1 + histologic3.t2 
+           + histologic4.t0 #+ histologic4.t1 + histologic4.t2 
+           + age.t0 #+ age.t1 + age.t2 
+           + SGOT.t0 #+ SGOT.t1 + SGOT.t2 
+           + LM1 + LM2, data=LMdata, id=id, 
+           scale.fix=FALSE,family=gaussian,jack=TRUE, 
+           corstr="independence") 
+round(cbind(mean=fit$beta,SE=sqrt(diag(fit$vbeta.ajs)), 
+            Z=fit$beta/sqrt(diag(fit$vbeta.ajs)), 
+            PVal=2-2*pnorm(abs(fit$beta/sqrt(diag(fit$vbeta.ajs)))) 
+),3) 
+
+# Plot dynamic coefficient (differences of 5-year cRMST) curves with 95% confidence intervals 
+bet<-fit$beta 
+sig<-fit$vbeta.ajs 
+
+m<-matrix(c(rep(1,length(sl)),sl/sL),length(sl),2) 
+LMsmooth<-data.frame(LM=sl,dRMST=as.numeric(m %*% bet[2:3])) 
+se<-sqrt(diag(m %*% sig[2:3,2:3] %*% t(m))) 
+LMsmooth$lower<-LMsmooth$dRMST-qnorm(0.975)*se 
+LMsmooth$upper<-LMsmooth$dRMST+qnorm(0.975)*se
+
+# Then we can plot the dynamic hazard ratio curves with its 95% confidence intervals: 
+tiff(file="D://Fig 3A.tif",width=2800,height=2400,res=300,units='px',pointsize=23.5,bg='0',compression='lzw') 
+par(xaxs="i",yaxs="i",mar=c(5,5,3,2)) 
+plot(LMsmooth$LM,LMsmooth$dRMST,type="l",lwd=6,xlim=c(0,sL),ylim=c(-0.5,0.1),bty="l",xaxt="n",yaxt="n",xlab="",ylab="") 
+axis(2,las=1,pos=0,cex.axis=1.1,tcl=-0.4,hadj=0.9,lwd=1.6) 
+axis(1,las=1,pos=-0.5,cex.axis=1.2,tcl=-0.4,padj=-0.3,lwd=1.6) 
+title(main=list("A. Drug",font=7,cex=1.5),line=1) 
+title(xlab="Prediction time in years (s)",font.lab=7,cex.lab=1.5,line=2.6) 
+title(ylab="Difference of 5-year cRMST (Coef)",font.lab=7,cex.lab=1.2,line=3.4) 
+lines(LMsmooth$LM,LMsmooth$lower,type="l",lty=2,lwd=6) 
+lines(LMsmooth$LM,LMsmooth$upper,type="l",lty=2,lwd=6) 
+abline(h=0,lwd=4,lty=3) 
+legend(0,-0.37,"D-penicillamine - Placebo",cex=1.3,bty="n",lwd=4) 
+dev.off() 
+
+# Individual dynamic prediction. 
+# This is the function to calculate the (s+5)-year RMST for the RMST model:
+# "patientid": the individual to be predicted. 
+# "tt": a set of valid prediction time. 
+RMST_pred<-function(patientid,tt){ 
+  dex<-duplicated(data$id) 
+  un_data<-data[!dex,] 
+  data_pred<-un_data[un_data$id==patientid,] 
+  RMST<-rep(NA,length(tt)) 
+  for (i in 1:length(tt)){ 
+    un_data$pseudo<-pseudomean(time=un_data$time, 
+                               event=un_data$status,tmax=tt[i]+w) 
+    RMST_fit<-geese(pseudo~drug+sex+serBilir+edema+albumin +prothrombin+histologic3+histologic4+age+SGOT,data=un_data,id=id,jack=TRUE,family=gaussian,corstr="independence",scale.fix=FALSE) 
+    a<-paste("data_pred$",RMST_fit$xnames[-1],sep="",collapse=",") 
+    b<-paste("matrix(c(rep(1,1),",a,"),1,length(RMST_fit$xnames))") 
+    c<-eval(parse(text=b)) 
+    RMST[i]<-as.numeric(RMST_fit$beta%*%t(c)) 
+  } 
+  return(RMST) 
+}
+
+#This is the function to calculate the 5-year cRMST for dynamic RMST model: 
+# "patientid": the individual to be predicted. 
+# "tt": a set of valid prediction time. 
+cRMST_pred<-function(patientid,tt){ 
+  coef<-fit$beta 
+  cRMST<-rep(NA,length(tt)) 
+  data_pre<-data[data$id==patientid,] 
+  inter<-findInterval(tt,data_pre$year) 
+  for (i in 1:length(tt)){ 
+    data_pred<-data_pre[inter[i],] 
+    data_pred<-define(data=data_pred,cov=c("drug","sex","serBilir","edema","albumin","prothrombin","histologic3","histologic4","age","SGOT"),time=tt[i]/sL) 
+    a<-paste("data_pred$",fit$xnames[-1],sep="",collapse=",") 
+    b<-paste("matrix(c(rep(1,1),",a,"),1,length(fit$xnames))") 
+    c<-eval(parse(text=b)) 
+    cRMST[i]<-as.numeric(coef%*%t(c)) 
+  } 
+  return(cRMST) 
+}
+
+#Then we can plot the curves for patient A: 
+RMST<-RMST_pred(patientid=92,tt=seq(0,sL,length=1001)) 
+cRMST<-cRMST_pred(patientid=92,tt=seq(0,sL,length=1001)) 
+tiff(file="D://Fig 4A.tif",width=2800,height=2400,res=300,units='px',pointsize=23.5,bg='0',compression='lzw') 
+par(xaxs="i",yaxs="i",mar=c(5,4,3,2)) 
+plot(seq(0,sL,length=1001),RMST,type="s",lwd=6,lty=2,xlim=c(0,sL),ylim=c(0,5),bty="l",xaxt="n",yaxt="n",xlab="",ylab="") 
+axis(1,las=1,pos=0,cex.axis=1.2,tcl=-0.4,padj=-0.3,lwd=1.6) 
+axis(2,las=1,pos=0,cex.axis=1.1,tcl=-0.4,hadj=0.9,lwd=1.6) 
+title(main=list("Patient A",font=7,cex=1.5),line=1) 
+title(xlab="Prediction time in years (s)",font.lab=7,cex.lab=1.5,line=2.6) 
+title(ylab="5-year cRMST or (s+5)-year RMST",font.lab=7,cex.lab=1.3,line=2.4) 
+lines(seq(0,sL,length=1001),cRMST,lwd=6) 
+legend(0.2,1.5,c("RMST model","Dynamic RMST model"),lty=c(2,1),bty="n",lwd=6,xpd=TRUE,cex=1.2) 
+dev.off() 
+
+# Model assessment. 
+# This function can be used to calculate Harrell’s C-index: 
+# "model": the model fitted on the training set 
+# "data": the test set 
+cindex<-function(model,data){ 
+  nt<-length(data$time) 
+  ord<-order(data$time,-data$status) 
+  time<-data$time[ord] 
+  status<-data$status[ord] 
+  coef<-model$beta 
+  a<-paste("data$",model$xnames[-1],sep="",collapse=",") 
+  b<-paste("matrix(c(rep(1,nt),",a,"),nt,length(model$xnames))") 
+  c<-eval(parse(text=b)) 
+  RMST<-as.numeric(coef%*%t(c))[ord] 
+  wh<-which(status==1) 
+  total<-con<-0 
+  for (m in wh){ 
+    for (n in ((m + 1):nt)) { 
+      if (time[n] > time[m]) { 
+        total <- total + 1 
+        if (RMST[n] > RMST[m])  
+          con <- con + 1 
+        if (RMST[n] == RMST[m])
+          con <- con + 0.5 
+      } 
+    } 
+  } 
+  return(con/total) 
+}
+
+#This function can be used to calculate the prediction error: 
+# "model": the model fitted on the training set 
+# "data": the test set 
+# "tt": the prediction window 
+# "time": the prediction time 
+PR<-function(model,data,tt,time){ 
+  nt<-nrow(data) 
+  coef<-model$beta 
+  a<-paste("data$",model$xnames[-1],sep="",collapse=",") 
+  b<-paste("matrix(c(rep(1,nt),",a,"),nt,length(model$xnames))",sep="") 
+  c<-eval(parse(text=b)) 
+  RMST<-as.numeric(coef%*%t(c)) 
+  wh<-which(data$status==1|data$time==tt) 
+  diff<-0 
+  for (m in wh){ 
+    diff<-diff+abs(time[m]-RMST[m]) 
+  } 
+  return(diff/length(wh)) 
+} 
+
+# Therefore, the Monte-Carlo cross-validation can be used:
+RMST_cindex<-data.frame(array(NA,dim=c(200,nsl))) 
+RMST_PR<-data.frame(array(NA,dim=c(200,nsl))) 
+cRMST_cindex<-data.frame(array(NA,dim=c(200,nsl))) 
+cRMST_PR<-data.frame(array(NA,dim=c(200,nsl))) 
+
+for (i in 1:200){ 
+  # The training set contains 70% of the samples. 
+  # Remaining 30% is the test set. 
+  set.seed(20200421+10*i) 
+  index<-sample(x=2,size=length(unique(data$id)),replace=TRUE,prob=c(0.7,0.3)) 
+  ID<-1:length(unique(data$id)) 
+  testID<-ID[index==2] 
+  traindata<-data[data$id %in% trainID,] 
+  testdata<-data[data$id %in% testID,] 
+  
+  dex<-duplicated(data$id) 
+  un_data<-data[!dex,] 
+  un_traindata<-un_data[index==1,] 
+  un_testdata<-un_data[index==2,]
+  trainID<-ID[index==1] 
+  
+  testID<-ID[index==2] 
+  traindata<-data[data$id %in% trainID,] 
+  testdata<-data[data$id %in% testID,] 
+  
+  dex<-duplicated(data$id) 
+  un_data<-data[!dex,] 
+  un_traindata<-un_data[index==1,] 
+  un_testdata<-un_data[index==2,]
+  
+  trainLMdata<-NULL 
+  for (j in seq(along=sl)){ 
+    trainLM<-cutLM(traindata,outcome=list(time="time", status="status"),LM=sl[j],horizon=sl[j]+w, covs=list(fixed=c("drug","sex","age"), varying=c("serBilir","edema","albumin", "prothrombin","histologic3","histologic4","SGOT")), format="long",id="id",rtime="year",right=F) 
+    trainLM$pseudo=pseudomean(time=trainLM$time-sl[j],event=trainLM$status,tmax=w) 
+    trainLMdata<-rbind(trainLMdata,trainLM) 
+  } 
+  
+  trainLMdata<-define(data=trainLMdata,cov=c("drug","sex","serBilir","edema","albumin","prothrombin", "histologic3","histologic4","age","SGOT"), time=trainLMdata$LM/sL) 
+  fit<-geese(pseudo~drug.t0 + drug.t1 #+ drug.t2 
+             + sex.t0 + sex.t1 + sex.t2 
+             + serBilir.t0 + serBilir.t1 + serBilir.t2 
+             + edema.t0 #+ edema.t1 + edema.t2 
+             + albumin.t0 #+ albumin.t1 + albumin.t2 
+             + prothrombin.t0 + prothrombin.t1 + prothrombin.t2 
+             + histologic3.t0 #+ histologic3.t1 + histologic3.t2 
+             + histologic4.t0 #+ histologic4.t1 + histologic4.t2 
+             + age.t0 #+ age.t1 + age.t2 
+             + SGOT.t0 #+ SGOT.t1 + SGOT.t2 
+             + LM1 + LM2 ,data=trainLMdata,id=id,scale.fix=FALSE, 
+             family=gaussian,jack=TRUE,corstr="independence") 
+  
+  for (k in seq(along=sl)){ 
+    testLM<-cutLM(testdata,outcome=list(time="time",status="status"),LM=sl[k],horizon=sl[k]+w,covs=list(fixed=c("drug","sex","age"),varying=c("serBilir","edema","albumin", "prothrombin","histologic3","histologic4","SGOT")),format="long",id="id",rtime="year",right=F) 
+    testLMdata<-define(data=testLM,cov=c("drug","sex","serBilir","edema","albumin","prothrombin","histologic3","histologic4","age","SGOT"),time=sl[k]/sL) 
+    
+    cRMST_cindex[i,k]<-cindex(model=fit,data=testLMdata) 
+    cRMST_PR[i,k]<-PR(model=fit,data=testLMdata,tt=sl[k]+w,time=testLMdata$time-sl[k]) 
+    
+    un_traindata$pseudo<-pseudomean(time=un_traindata$time,event=un_traindata$status,tmax=sl[k]+w) 
+    RMST_fit<-geese(pseudo~drug+sex+serBilir+edema+albumin +prothrombin+histologic3+histologic4+age+SGOT, data=un_traindata,id=id,jack=TRUE,family=gaussian,corstr="independence",scale.fix=FALSE) 
+    un_testLM<-cutLM(un_testdata,outcome=list(time="time",status="status"),LM=sl[k],horizon=sl[k]+w, covs=list(fixed=c("drug","sex","serBilir","edema","albumin","prothrombin","histologic3","histologic4","age","SGOT"),varying=NULL)) 
+    RMST_cindex[i,k]<-cindex(model=RMST_fit,data=un_testLM) 
+    RMST_PR[i,k]<-PR(model=RMST_fit,data=un_testLM,tt=sl[k]+w,time=un_testLM$time) 
+  }
+}
+
+## Obtain average C-index and prediction error values. 
+RMSTCI<-apply(RMST_cindex,2,mean) 
+cRMSTCI<-apply(cRMST_cindex,2,mean) 
+RMSTPR<-apply(RMST_PR,2,mean) 
+cRMSTPR<-apply(cRMST_PR,2,mean) 
+CP<-cbind(sl,RMSTCI,cRMSTCI,RMSTPR,cRMSTPR);CP 
+tiff(file="D://Fig 5A.tif",width=2800,height=2400,res=300,units="px",pointsize=23.5,bg="0",compression="lzw")  
+par(xaxs="i",yaxs="i",mar=c(5,5,2,2)) 
+plot(CP[,1],CP[,2],lwd=6,type="l",bty="l",xlim=c(0,sL),ylim=c(0.6,0.9),lty=2,xaxt="n",yaxt="n",xlab="",ylab="") 
+axis(1,las=1,pos=0.6,cex.axis=1.3,tcl=-0.4,padj=-0.3,lwd=1.6) 
+axis(2,las=1,pos=0,cex.axis=1.3,tcl=-0.4,hadj=0.9,lwd=1.6) 
+title(xlab="Prediction time in years (s)",font.lab=7,cex.lab=1.5, line=2.6) 
+
+title(ylab="C-index",font.lab=7,cex.lab=1.3,line=3.5) 
+lines(CP[,1],CP[,3],lwd=6,lty=1) 
+legend(0.2,0.69,c("Dynamic RMST model","RMST model"),lty=1:2,bty="n",lwd=6,xpd=TRUE,cex=1.1) 
+dev.off() 
+
